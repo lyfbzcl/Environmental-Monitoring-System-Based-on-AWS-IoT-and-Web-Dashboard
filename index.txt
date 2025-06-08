@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Environmental Monitor Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f4; }
+    #login-btn { padding: 8px 16px; }
+    #dashboard { display: none; }
+    canvas { max-width: 600px; }
+    #threshold-form { margin-top: 20px; }
+    .th-label { min-width: 130px; display: inline-block; }
+    .th-input { width: 80px; }
+    .th-row { margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Environmental Monitor Dashboard</h1>
+  <div id="unauth">
+    <p>Please log in to view real-time data.</p>
+    <button id="login-btn">Log In</button>
+  </div>
+  
+  <div id="dashboard">
+    <p>
+      Current user: <span id="user-email"></span> | 
+      <a href="#" id="logout-link">Log out</a>
+    </p>
+    <h2>Real-time Sensor Data</h2>
+    <canvas id="temperatureChart" width="600" height="400"></canvas>
+    <canvas id="humidityChart" width="600" height="400"></canvas>
+    <canvas id="pressureChart" width="600" height="400"></canvas>
+    <div id="latest-values"></div>
+    <div id="threshold-form">
+      <div class="th-row">
+        <label class="th-label" for="threshold-temp">Temperature Threshold (°C):</label>
+        <input class="th-input" type="number" id="threshold-temp" step="0.1" />
+      </div>
+      <div class="th-row">
+        <label class="th-label" for="threshold-hum">Humidity Threshold (%):</label>
+        <input class="th-input" type="number" id="threshold-hum" step="0.1" />
+      </div>
+      <div class="th-row">
+        <label class="th-label" for="threshold-pres">Pressure Threshold (hPa):</label>
+        <input class="th-input" type="number" id="threshold-pres" step="0.1" />
+      </div>
+      <button id="update-btn">Update Thresholds</button>
+      <span id="update-msg"></span>
+    </div>
+  </div>
+  
+  <script>
+    // Cognito config
+    const CognitoDomain = "env-monitor.auth.ap-southeast-1.amazoncognito.com";
+    const ClientId = "59r02jvhdppa0fe3qckl8mmevn";
+    const APIInvokeURL = "https://3jtpis3364.execute-api.ap-southeast-1.amazonaws.com/prod";
+    const RedirectURI = "https://ddg1eb70s1f16.cloudfront.net/";
+
+    // Check for ID token in URL hash
+    let idToken = null;
+    if (window.location.hash && window.location.hash.includes("id_token")) {
+      const hash = window.location.hash.substring(1);
+      const params = new URLSearchParams(hash);
+      idToken = params.get("id_token");
+      window.localStorage.setItem("idToken", idToken);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    if (!idToken) {
+      idToken = window.localStorage.getItem("idToken");
+    }
+
+    const loginBtn = document.getElementById("login-btn");
+    const dashboardDiv = document.getElementById("dashboard");
+    const unauthDiv = document.getElementById("unauth");
+    if (idToken) {
+      unauthDiv.style.display = 'none';
+      dashboardDiv.style.display = 'block';
+      // Decode user email from token
+      const payloadBase64 = idToken.split('.')[1];
+      const payloadJson = JSON.parse(atob(payloadBase64));
+      document.getElementById("user-email").innerText = payloadJson.email || "(Unknown)";
+      fetchAndFillThresholds();
+    } else {
+      unauthDiv.style.display = 'block';
+      dashboardDiv.style.display = 'none';
+    }
+    // Log in button
+    loginBtn.onclick = () => {
+      const loginUrl = `https://${CognitoDomain}/login?response_type=token&client_id=${ClientId}&redirect_uri=${encodeURIComponent(RedirectURI)}`;
+      window.location.href = loginUrl;
+    };
+    // Log out
+    document.getElementById("logout-link").onclick = (e) => {
+      e.preventDefault();
+      window.localStorage.removeItem("idToken");
+      window.location.href = `https://${CognitoDomain}/logout?client_id=${ClientId}&logout_uri=${encodeURIComponent(RedirectURI)}`;
+    };
+
+    // Chart initialization
+    const ctxTemperature = document.getElementById('temperatureChart').getContext('2d');
+    const ctxHumidity = document.getElementById('humidityChart').getContext('2d');
+    const ctxPressure = document.getElementById('pressureChart').getContext('2d');
+
+    const temperatureChart = new Chart(ctxTemperature, {
+      type: 'line',
+      data: { labels: [], datasets: [{
+        label: 'Temperature (°C)', data: [],
+        borderColor: 'rgba(255, 99, 132, 1)',
+        backgroundColor: 'rgba(255,99,132,0.05)', fill: false, pointRadius: 3, pointHoverRadius: 5
+      }]},
+      options: {
+        responsive: true,
+        plugins: { legend: { display: true } },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'minute', displayFormats: { minute: 'HH:mm:ss' } },
+            title: { display: true, text: 'Time' }
+          },
+          y: {
+            min: -40, max: 110,
+            ticks: { stepSize: 10, callback: value => value.toFixed(0) },
+            title: { display: true, text: 'Temperature (°C)' }
+          }
+        }
+      }
+    });
+
+    const humidityChart = new Chart(ctxHumidity, {
+      type: 'line',
+      data: { labels: [], datasets: [{
+        label: 'Humidity (%)', data: [],
+        borderColor: 'rgba(54, 162, 235, 1)',
+        backgroundColor: 'rgba(54, 162, 235, 0.05)', fill: false, pointRadius: 3, pointHoverRadius: 5
+      }]},
+      options: {
+        responsive: true,
+        plugins: { legend: { display: true } },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'minute', displayFormats: { minute: 'HH:mm:ss' } },
+            title: { display: true, text: 'Time' }
+          },
+          y: {
+            min: 0, max: 100, ticks: { stepSize: 10 },
+            title: { display: true, text: 'Humidity (%)' }
+          }
+        }
+      }
+    });
+
+    const pressureChart = new Chart(ctxPressure, {
+      type: 'line',
+      data: { labels: [], datasets: [{
+        label: 'Pressure (hPa)', data: [],
+        borderColor: 'rgba(75, 192, 192, 1)',
+        backgroundColor: 'rgba(75, 192, 192, 0.05)', fill: false, pointRadius: 3, pointHoverRadius: 5
+      }]},
+      options: {
+        responsive: true,
+        plugins: { legend: { display: true } },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: 'minute', displayFormats: { minute: 'HH:mm:ss' } },
+            title: { display: true, text: 'Time' }
+          },
+          y: {
+            min: 250, max: 1400,
+            ticks: { stepSize: 100, callback: value => value.toFixed(0) },
+            title: { display: true, text: 'Pressure (hPa)' }
+          }
+        }
+      }
+    });
+
+    // 自动读取已有阈值并填充
+    async function fetchAndFillThresholds() {
+      try {
+        const resp = await fetch(APIInvokeURL + '/threshold?device_id=raspi-01', {
+          headers: { 'Authorization': 'Bearer ' + idToken }
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.temperature_threshold !== undefined)
+            document.getElementById("threshold-temp").value = data.temperature_threshold;
+          if (data.humidity_threshold !== undefined)
+            document.getElementById("threshold-hum").value = data.humidity_threshold;
+          if (data.pressure_threshold !== undefined)
+            document.getElementById("threshold-pres").value = data.pressure_threshold;
+        }
+      } catch (err) {
+        console.error("阈值获取失败:", err);
+      }
+    }
+
+    // Fetch and update UI
+    async function fetchDataAndUpdate() {
+      if (!idToken) return;
+      try {
+        const response = await fetch(APIInvokeURL + '/sensorData?device_id=raspi-01', {
+          headers: { 'Authorization': 'Bearer ' + idToken }
+        });
+        if (!response.ok) {
+          console.error("Fetch data failed:", response.status);
+          return;
+        }
+        const items = await response.json();
+        if (!Array.isArray(items) || items.length === 0) return;
+        const latestItem = items[0];
+        document.getElementById("latest-values").innerText = 
+          `Latest Time: ${new Date(latestItem.timestamp).toLocaleString()}, ` +
+          `Temperature: ${latestItem.temperature}°C, Humidity: ${latestItem.humidity}% , Pressure: ${latestItem.pressure} hPa`;
+        
+        temperatureChart.data.labels = items.map(it => new Date(it.timestamp));
+        temperatureChart.data.datasets[0].data = items.map(it => it.temperature);
+        temperatureChart.update();
+
+        humidityChart.data.labels = items.map(it => new Date(it.timestamp));
+        humidityChart.data.datasets[0].data = items.map(it => it.humidity);
+        humidityChart.update();
+
+        pressureChart.data.labels = items.map(it => new Date(it.timestamp));
+        pressureChart.data.datasets[0].data = items.map(it => it.pressure);
+        pressureChart.update();
+
+      } catch (err) {
+        console.error("Error updating data:", err);
+      }
+    }
+
+    setInterval(fetchDataAndUpdate, 5000);
+    fetchDataAndUpdate();
+
+    // Update thresholds
+    document.getElementById("update-btn").onclick = async () => {
+      const temp = parseFloat(document.getElementById("threshold-temp").value);
+      const hum  = parseFloat(document.getElementById("threshold-hum").value);
+      const pres = parseFloat(document.getElementById("threshold-pres").value);
+      if (isNaN(temp) && isNaN(hum) && isNaN(pres)) {
+        alert("Please enter at least one threshold.");
+        return;
+      }
+      const payload = { device_id: 'raspi-01' };
+      if (!isNaN(temp)) payload.temperature_threshold = temp;
+      if (!isNaN(hum))  payload.humidity_threshold    = hum;
+      if (!isNaN(pres)) payload.pressure_threshold    = pres;
+
+      try {
+        const resp = await fetch(APIInvokeURL + '/threshold', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + idToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+        const result = await resp.json();
+        document.getElementById("update-msg").innerText = result.msg || result.message || 'Thresholds updated.';
+        fetchAndFillThresholds();
+      } catch (err) {
+        console.error("Threshold update failed:", err);
+        document.getElementById("update-msg").innerText = 'Update failed.';
+      }
+    };
+  </script>
+</body>
+</html>
